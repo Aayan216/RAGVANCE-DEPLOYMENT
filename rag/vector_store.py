@@ -1,4 +1,8 @@
+import io
 import os
+import shutil
+import tempfile
+import zipfile
 import faiss
 import numpy as np
 import pickle
@@ -18,6 +22,8 @@ class VectorStore:
 
     def _load_or_create(self):
         if os.path.exists(self.index_path) and os.path.exists(self.meta_path):
+            self.load()
+        elif self._restore_from_cloud():
             self.load()
         else:
             self.index = faiss.IndexFlatIP(384)
@@ -70,6 +76,66 @@ class VectorStore:
         with open(self.meta_path, "wb") as f:
             pickle.dump(self.metadata, f)
         print(f"[INFO] Saved FAISS index ({self.index.ntotal} vectors) to {self.persist_dir}")
+        self._mirror_to_cloud()
+
+    VECTOR_BUNDLE_KEY = "vector_index.zip"
+    VECTOR_BUCKET = "ragvance-vectors"
+
+    def _mirror_to_cloud(self):
+        """Best-effort: upload faiss.index + metadata.pkl as ONE zip object.
+
+        A single upsert means the remote pair is replaced atomically — one
+        upload cannot succeed while the other fails. Failures only warn and
+        never raise; the local files remain the source of truth.
+        """
+        try:
+            from backend import supabase_storage as storage
+
+            if not storage.is_enabled():
+                return
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+                bundle.write(self.index_path, "faiss.index")
+                bundle.write(self.meta_path, "metadata.pkl")
+            storage.upload_file(
+                self.VECTOR_BUNDLE_KEY, buffer.getvalue(), bucket=self.VECTOR_BUCKET
+            )
+        except Exception as exc:
+            print(f"[WARN] FAISS cloud mirror skipped: {type(exc).__name__}")
+
+    def _restore_from_cloud(self):
+        """Download the bundle; materialize BOTH local files only on success.
+
+        Runs only when the local pair is missing. Extraction happens in a temp
+        directory inside persist_dir (same filesystem); files are moved into
+        place only after both members unpack cleanly. A failure between the
+        two moves self-heals on the next start (pair incomplete -> restore
+        runs again).
+        """
+        try:
+            from backend import supabase_storage as storage
+
+            if not storage.is_enabled():
+                return False
+            data = storage.download_file(self.VECTOR_BUNDLE_KEY, bucket=self.VECTOR_BUCKET)
+            workdir = tempfile.mkdtemp(dir=self.persist_dir, prefix=".restore_")
+            try:
+                with zipfile.ZipFile(io.BytesIO(data)) as bundle:
+                    names = set(bundle.namelist())
+                    if "faiss.index" not in names or "metadata.pkl" not in names:
+                        print("[WARN] FAISS restore skipped: incomplete bundle")
+                        return False
+                    bundle.extract("faiss.index", workdir)
+                    bundle.extract("metadata.pkl", workdir)
+                os.replace(os.path.join(workdir, "faiss.index"), self.index_path)
+                os.replace(os.path.join(workdir, "metadata.pkl"), self.meta_path)
+                print(f"[INFO] Restored FAISS bundle from Supabase Storage")
+                return True
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
+        except Exception as exc:
+            print(f"[WARN] FAISS restore skipped: {type(exc).__name__}")
+            return False
 
     def load(self):
         self.index = faiss.read_index(self.index_path)

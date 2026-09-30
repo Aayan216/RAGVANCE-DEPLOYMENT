@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from django.shortcuts import render, redirect, get_object_or_404
 from django.http import JsonResponse, HttpResponseBadRequest
@@ -10,6 +11,7 @@ from django.utils import timezone
 
 from backend.models import Document, Chunk, MockTest, TestAttempt, UserAnswer
 from backend.forms import DocumentUploadForm, TutorQuestionForm
+from backend import supabase_storage
 from rag import (
     FileParser,
     TextChunker,
@@ -45,6 +47,15 @@ def upload_view(request):
                 doc.title = doc.file.name
             doc.file_type = FileParser.detect_file_type(doc.file.name)
             doc.save()
+            if supabase_storage.is_enabled():
+                try:
+                    with open(doc.file.path, "rb") as handle:
+                        supabase_storage.upload_file(doc.file.name, handle.read())
+                except Exception as exc:
+                    messages.warning(
+                        request,
+                        f"Saved, but cloud storage sync failed ({type(exc).__name__}).",
+                    )
             messages.success(request, f"Uploaded: {doc.title}")
             return redirect("upload")
     else:
@@ -63,9 +74,18 @@ def process_document_view(request, doc_id):
         return JsonResponse({"status": "already_processed", "chunks": doc.chunk_count})
     
     try:
-        # Parse
-        file_path = doc.file.path
-        pages = FileParser.parse(file_path, doc.file_type)
+        # Parse (local file if present; otherwise pull a temp copy from Storage)
+        file_path, temp_path = supabase_storage.materialize_file(
+            doc.file.name, doc.file.path
+        )
+        try:
+            pages = FileParser.parse(file_path, doc.file_type)
+        finally:
+            if temp_path:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
         # Clean (whitespace/dehyphenation + repeated header/footer removal)
         pages = clean_pages(pages)
@@ -142,9 +162,15 @@ def delete_document_view(request, doc_id):
         # 1. Remove from FAISS vector store
         vector_store.delete_document(doc.id)
 
-        # 2. Delete uploaded file from disk
+        # 2. Delete uploaded file from disk and best-effort from Supabase Storage
         if doc.file:
+            relative_name = doc.file.name
             doc.file.delete(save=False)
+            if relative_name and supabase_storage.is_enabled():
+                try:
+                    supabase_storage.delete_file(relative_name)
+                except Exception:
+                    pass
 
         # 3. Delete document record (CASCADE deletes chunks too)
         doc.delete()

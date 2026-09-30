@@ -49,8 +49,12 @@ distro==1.9.0
     # via
     #   google-genai
     #   langsmith
-django==5.2.17
+dj-database-url==3.1.2
     # via ragvance
+django==5.2.17
+    # via
+    #   dj-database-url
+    #   ragvance
 faiss-cpu==1.15.0
     # via ragvance
 filelock==3.32.6
@@ -73,6 +77,8 @@ google-genai==2.23.0
     # via langchain-google-genai
 greenlet==3.5.5 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'
     # via sqlalchemy
+gunicorn==26.2.0
+    # via ragvance
 h11==0.16.0
     # via
     #   httpcore
@@ -250,6 +256,10 @@ propcache==0.5.2
     # via
     #   aiohttp
     #   yarl
+psycopg==3.3.6
+    # via ragvance
+psycopg-binary==3.3.6 ; implementation_name != 'pypy'
+    # via psycopg
 pyasn1==0.6.4
     # via pyasn1-modules
 pyasn1-modules==0.4.2
@@ -302,6 +312,7 @@ requests==2.34.2
     #   langchain-classic
     #   langchain-community
     #   langsmith
+    #   ragvance
     #   requests-toolbelt
 requests-toolbelt==1.0.0
     # via langsmith
@@ -374,6 +385,7 @@ typing-extensions==4.16.0
     #   langchain-core
     #   langchain-protocol
     #   langsmith
+    #   psycopg
     #   pydantic
     #   pydantic-core
     #   python-docx
@@ -390,6 +402,7 @@ tzdata==2026.4 ; sys_platform == 'emscripten' or sys_platform == 'win32'
     # via
     #   django
     #   pandas
+    #   psycopg
 urllib3==2.7.0
     # via requests
 uuid-utils==0.17.1
@@ -401,6 +414,8 @@ websockets==16.1.1
     #   google-genai
     #   langgraph-sdk
     #   langsmith
+whitenoise==6.12.0
+    # via ragvance
 xlsxwriter==3.2.9
     # via python-pptx
 xxhash==4.0.1

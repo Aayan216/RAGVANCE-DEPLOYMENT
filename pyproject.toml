@@ -20,6 +20,11 @@ dependencies = [
     "python-dotenv>=1.0",
     "numpy>=2.5.1",
     "pandas>=2.0",
+    "gunicorn>=23.0",
+    "whitenoise>=6.8",
+    "dj-database-url>=2.5",
+    "psycopg[binary]>=3.2",
+    "requests>=2.32",
 ]
 
 [build-system]

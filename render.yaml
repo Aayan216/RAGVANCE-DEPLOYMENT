@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: ragvance
+    runtime: python
+    plan: free
+    healthCheckPath: /
+    buildCommand: >-
+      grep -vE '^(nvidia|triton|cuda-)' requirements.txt > /tmp/requirements.render.txt
+      && pip install --no-cache-dir torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
+      && pip install --no-cache-dir -r /tmp/requirements.render.txt
+      && python manage.py collectstatic --noinput
+      && python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+    releaseCommand: python manage.py migrate --noinput
+    startCommand: gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 1 --timeout 180
+    envVars:
+      - key: DEBUG
+        value: "False"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: ALLOWED_HOSTS
+        sync: false
+      - key: CSRF_TRUSTED_ORIGINS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: ragvance-document
+      - key: GEMINI_API_KEY
+        sync: false
