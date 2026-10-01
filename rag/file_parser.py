@@ -1,9 +1,6 @@
 import os
 from pathlib import Path
 from typing import List, Dict, Any
-import fitz
-from docx import Document as DocxDocument
-from pptx import Presentation
 
 
 class FileParser:
@@ -28,6 +25,7 @@ class FileParser:
 
     @staticmethod
     def _parse_pdf(file_path: str, file_name: str) -> List[Dict[str, Any]]:
+        import fitz
         pages = []
         doc = fitz.open(file_path)
         for page_num, page in enumerate(doc, 1):
@@ -43,6 +41,7 @@ class FileParser:
 
     @staticmethod
     def _parse_docx(file_path: str, file_name: str) -> List[Dict[str, Any]]:
+        from docx import Document as DocxDocument
         doc = DocxDocument(file_path)
         full_text = []
         for para in doc.paragraphs:
@@ -57,6 +56,7 @@ class FileParser:
 
     @staticmethod
     def _parse_pptx(file_path: str, file_name: str) -> List[Dict[str, Any]]:
+        from pptx import Presentation
         prs = Presentation(file_path)
         pages = []
         for slide_num, slide in enumerate(prs.slides, 1):

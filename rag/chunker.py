@@ -1,9 +1,12 @@
 from typing import List, Dict, Any
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 class TextChunker:
     def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50):
+        # Deferred: langchain_text_splitters pulls sentence_transformers
+        # (torch/sklearn/pandas) at import time, which would blow the
+        # Render free 512MB budget during gunicorn boot.
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.splitter = RecursiveCharacterTextSplitter(

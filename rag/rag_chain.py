@@ -3,7 +3,6 @@ import json
 import re
 import itertools
 from typing import List, Dict, Any, Optional
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 from django.conf import settings
 from .vector_store import VectorStore
@@ -215,6 +214,7 @@ class RAGChain:
             raise ValueError("GEMINI_API_KEY not found in environment")
         
         model_name = getattr(settings, "GEMINI_MODEL", "gemini-3.5-flash-lite")
+        from langchain_google_genai import ChatGoogleGenerativeAI
         self.llm = ChatGoogleGenerativeAI(
             google_api_key=api_key,
             model=model_name,

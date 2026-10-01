@@ -1,6 +1,5 @@
 import numpy as np
 from typing import List, Dict, Any
-from sentence_transformers import SentenceTransformer
 from django.conf import settings
 
 
@@ -15,6 +14,7 @@ class Embedder:
 
     def __init__(self):
         if self._model is None:
+            from sentence_transformers import SentenceTransformer
             model_name = getattr(settings, "EMBEDDING_MODEL", "all-MiniLM-L6-v2")
             self._model = SentenceTransformer(model_name)
             print(f"[INFO] Loaded embedding model: {model_name}")

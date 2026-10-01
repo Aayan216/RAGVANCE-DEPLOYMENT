@@ -1,5 +1,7 @@
 import json
 import os
+import sys
+import threading
 import time
 from django.shortcuts import render, redirect, get_object_or_404
 from django.http import JsonResponse, HttpResponseBadRequest
@@ -22,19 +24,127 @@ from rag import (
 )
 from rag.cleaning import clean_pages, near_duplicate_mask
 from rag.llm_resilience import is_transient_llm_error
-from mock_test import (
-    MockTestService,
-    PerformanceAnalyzer,
-)
+# mock_test (pulls pandas + sklearn) is imported lazily by the proxies below.
 
 
-# Initialize services
-vector_store = VectorStore()
-embedder = Embedder()
-rag_chain = RAGChain(vector_store, embedder)
-mcq_generator = MCQGenerator(rag_chain)
-mock_test_service = MockTestService(rag_chain)
-analyzer = PerformanceAnalyzer()
+def _rss_mb():
+    """Current process resident set size in MB, or None if unavailable."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+
+            class _ProcessMemoryCounters(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = _ProcessMemoryCounters()
+            counters.cb = ctypes.sizeof(counters)
+            proc = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.kernel32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+            ctypes.windll.kernel32.K32GetProcessMemoryInfo.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(_ProcessMemoryCounters),
+                wintypes.DWORD,
+            ]
+            if not ctypes.windll.kernel32.K32GetProcessMemoryInfo(
+                proc, ctypes.byref(counters), counters.cb
+            ):
+                return None
+            return counters.WorkingSetSize / (1024 * 1024)
+        with open("/proc/self/statm", "r", encoding="ascii") as handle:
+            resident_pages = int(handle.read().split()[1])
+        return resident_pages * (os.sysconf("SC_PAGE_SIZE") / (1024 * 1024))
+    except Exception:
+        return None
+
+
+def _log_rss(stage):
+    rss = _rss_mb()
+    if rss is not None:
+        print(f"[MEM] rss={rss:.1f} MB ({stage})", flush=True)
+
+
+class _LazyService:
+    """Defer building a heavy service until its first use.
+
+    Keeps gunicorn/Django boot free of torch/sentence_transformers/pandas so
+    the Render free instance passes its health check under the 512MB limit.
+    Attribute access, calls and len() all transparently trigger the build.
+    """
+
+    def __init__(self, name, factory):
+        self._name = name
+        self._factory = factory
+        self._obj = None
+        self._lock = threading.Lock()
+
+    def _build(self):
+        # Read state via __dict__ so a missing attribute can never recurse
+        # back into __getattr__ while the object is still being constructed.
+        state = self.__dict__
+        if state["_obj"] is None:
+            with state["_lock"]:
+                if state["_obj"] is None:
+                    state["_obj"] = state["_factory"]()
+                    _log_rss(f"loaded {state['_name']}")
+        return state["_obj"]
+
+    def __getattr__(self, item):
+        if item.startswith("__") and item.endswith("__"):
+            raise AttributeError(item)
+        return getattr(self._build(), item)
+
+    def __setattr__(self, item, value):
+        # Route attribute writes to the real service so that test/service
+        # patches like `rag_chain.llm = stub` take effect on the object whose
+        # methods actually run (matches the pre-proxy eager behavior).
+        if item in ("_name", "_factory", "_obj", "_lock"):
+            object.__setattr__(self, item, value)
+        else:
+            setattr(self._build(), item, value)
+
+    def __call__(self, *args, **kwargs):
+        return self._build()(*args, **kwargs)
+
+    def __bool__(self):
+        # Always truthy so `proxy or Fallback()` keeps the proxy (a real
+        # service could be falsy via len(), which would build it eagerly).
+        return True
+
+    def __len__(self):
+        return len(self._build())
+
+
+def _build_mock_test_service():
+    from mock_test import MockTestService
+    return MockTestService(rag_chain)
+
+
+def _build_analyzer():
+    from mock_test import PerformanceAnalyzer
+    return PerformanceAnalyzer()
+
+
+# Initialize services (lazily: built on first request that needs them)
+vector_store = _LazyService("vector_store", lambda: VectorStore())
+embedder = _LazyService("embedder", lambda: Embedder())
+rag_chain = _LazyService("rag_chain", lambda: RAGChain(vector_store, embedder))
+mcq_generator = _LazyService("mcq_generator", lambda: MCQGenerator(rag_chain))
+mock_test_service = _LazyService("mock_test_service", _build_mock_test_service)
+analyzer = _LazyService("analyzer", _build_analyzer)
+
+_log_rss("imported backend.views")
 
 
 def upload_view(request):
