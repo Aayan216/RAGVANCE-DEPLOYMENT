@@ -26,3 +26,10 @@ The deployment repository is intentionally kept separate from the development re
 ## Status
 
 Production deployment is currently active and tested.
+
+---
+
+## Author
+
+**Mohammed Aayan**  
+B.Tech — Computer Science & Information Technology
