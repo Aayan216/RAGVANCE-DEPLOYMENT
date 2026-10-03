@@ -25,6 +25,9 @@ dependencies = [
     "dj-database-url>=2.5",
     "psycopg[binary]>=3.2",
     "requests>=2.32",
+    "onnxruntime>=1.30",
+    "onnx>=1.23",
+    "onnxscript>=0.7",
 ]
 
 [build-system]
