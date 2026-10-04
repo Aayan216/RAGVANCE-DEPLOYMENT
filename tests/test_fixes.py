@@ -14,13 +14,18 @@ django.setup()
 from django.db import transaction
 from django.test import Client, RequestFactory
 
-from backend.models import MockTest
+from backend.models import Document, MockTest
 from rag.rag_chain import _redact_secrets
 from backend.views import (
     mock_test_settings_view,
     practice_generate_view,
     rag_chain,
 )
+
+# Fixture doc: resolve a live processed document instead of hardcoding an id.
+DOC_ID = Document.objects.filter(processed=True).values_list("id", flat=True).first()
+if DOC_ID is None:
+    raise SystemExit("requires >=1 processed document in corpus")
 
 RESULTS = []
 
@@ -42,7 +47,7 @@ ok("normal messages untouched", _redact_secrets(m3) == m3)
 rf = RequestFactory()
 req = rf.post(
     "/practice/generate/",
-    data=json.dumps({"num_questions": 5, "difficulty": "medium", "topic": None, "doc_ids": [13]}),
+    data=json.dumps({"num_questions": 5, "difficulty": "medium", "topic": None, "doc_ids": [DOC_ID]}),
     content_type="application/json",
 )
 t0 = time.time()
@@ -76,7 +81,7 @@ rag_chain.llm = boom
 
 req_f = rf.post(
     "/practice/generate/",
-    data=json.dumps({"num_questions": 5, "difficulty": "medium", "topic": None, "doc_ids": [13]}),
+    data=json.dumps({"num_questions": 5, "difficulty": "medium", "topic": None, "doc_ids": [DOC_ID]}),
     content_type="application/json",
 )
 buf = io.StringIO()
@@ -91,7 +96,7 @@ ok("practice failure clean error message", err == "Could only generate 0 of 5 qu
 ok("practice [ERROR] logged with operation", "[ERROR] practice MCQ batch failed" in logged)
 ok("practice log has batch_count", "batch_count=5" in logged)
 ok("practice log has exception type+message", "Exception:" in logged and "simulated 503" in logged)
-ok("practice log has doc_ids", "doc_ids=[13]" in logged)
+ok("practice log has doc_ids", f"doc_ids=[{DOC_ID}]" in logged)
 ok("practice log API key redacted", "AIzaSyFAKESECRET1234567890" not in logged and "key=***" in logged)
 ok("practice retry cap respected (2 attempts = 10 slots)", boom.n == 2, f"llm attempts={boom.n}, elapsed={time.time()-t1:.1f}s")
 ok("practice FAILED summary line present", "[info] practice generation failed" in logged.lower() and "requested=5" in logged, [l for l in logged.splitlines() if "FAILED" in l])
@@ -102,7 +107,7 @@ rag_chain.llm = orig_llm
 before_ok = True
 req_m = rf.post(
     "/mock-test/",
-    data=json.dumps({"num_questions": 20, "difficulty": "medium", "timer_minutes": 30, "doc_ids": [13]}),
+    data=json.dumps({"num_questions": 20, "difficulty": "medium", "timer_minutes": 30, "doc_ids": [DOC_ID]}),
     content_type="application/json",
 )
 t2 = time.time()
@@ -124,7 +129,7 @@ boom2 = BoomLLM()
 rag_chain.llm = boom2
 req_mf = rf.post(
     "/mock-test/",
-    data=json.dumps({"num_questions": 20, "difficulty": "medium", "timer_minutes": 30, "doc_ids": [13]}),
+    data=json.dumps({"num_questions": 20, "difficulty": "medium", "timer_minutes": 30, "doc_ids": [DOC_ID]}),
     content_type="application/json",
 )
 count_before = MockTest.objects.count()

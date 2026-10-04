@@ -9,9 +9,14 @@ django.setup()
 
 from django.utils import timezone
 
-from backend.models import MockTest, TestQuestion, TestAttempt, UserAnswer
+from backend.models import Document, MockTest, TestQuestion, TestAttempt, UserAnswer
 from backend.views import mock_test_service
 from rag.batch_generation import validate_true_false, validate_mcq
+
+# Fixture doc: resolve a live processed document instead of hardcoding an id.
+DOC_ID = Document.objects.filter(processed=True).values_list("id", flat=True).first()
+if DOC_ID is None:
+    raise SystemExit("requires >=1 processed document in corpus")
 
 PASSED = 0
 FAILED = 0
@@ -56,7 +61,7 @@ def make_att(test):
 
 # ============ LIVE 1: mcq regression 10q ============
 print("=== LIVE 1: mcq 10 ===", flush=True)
-t1 = mock_test_service.create_test(num_questions=10, difficulty="medium", timer_minutes=10, doc_ids=[13], question_type="mcq")
+t1 = mock_test_service.create_test(num_questions=10, difficulty="medium", timer_minutes=10, doc_ids=[DOC_ID], question_type="mcq")
 qs1 = list(TestQuestion.objects.filter(test=t1).order_by("id"))
 check_common(qs1, 10, "mcq")
 ok("mcq: 4 options filled", all(q.option_a and q.option_b and q.option_c and q.option_d for q in qs1))
@@ -67,7 +72,7 @@ ok("mcq: validate_mcq passes all", all(validate_mcq({
 
 # ============ LIVE 2: true_false 10q ============
 print("=== LIVE 2: true_false 10 ===", flush=True)
-t2 = mock_test_service.create_test(num_questions=10, difficulty="medium", timer_minutes=10, doc_ids=[13], question_type="true_false")
+t2 = mock_test_service.create_test(num_questions=10, difficulty="medium", timer_minutes=10, doc_ids=[DOC_ID], question_type="true_false")
 qs2 = list(TestQuestion.objects.filter(test=t2).order_by("id"))
 check_common(qs2, 10, "true_false")
 ok("tf: C/D empty", all(q.option_c == "" and q.option_d == "" for q in qs2),
@@ -83,7 +88,7 @@ ok("tf: statements differ from MCQ text", not (set(norm(q.question_text) for q i
 
 # ============ LIVE 3: both 10q ============
 print("=== LIVE 3: both 10 ===", flush=True)
-t3 = mock_test_service.create_test(num_questions=10, difficulty="medium", timer_minutes=10, doc_ids=[13], question_type="both")
+t3 = mock_test_service.create_test(num_questions=10, difficulty="medium", timer_minutes=10, doc_ids=[DOC_ID], question_type="both")
 qs3 = list(TestQuestion.objects.filter(test=t3).order_by("id"))
 check_common(qs3, 10)
 types = [q.question_type for q in qs3]
@@ -101,7 +106,7 @@ print("=== LIVE 4: view POST, forced both ===", flush=True)
 from django.test import Client
 
 vc = Client()
-r = vc.post("/mock-test/", data='{"num_questions": 10, "difficulty": "medium", "timer_minutes": 30, "doc_ids": [13]}', content_type="application/json")
+r = vc.post("/mock-test/", data=f'{{"num_questions": 10, "difficulty": "medium", "timer_minutes": 30, "doc_ids": [{DOC_ID}]}}', content_type="application/json")
 ok("view POST 200 + redirect", r.status_code == 200 and r.json().get("redirect", "").startswith("/mock-test/"), r.content[:200])
 v_test_id = int(r.json()["redirect"].strip("/").split("/")[1])
 v_types = list(TestQuestion.objects.filter(test_id=v_test_id).order_by("id").values_list("question_type", flat=True))
@@ -110,7 +115,7 @@ ok("view POST: tf at positions [3,6,8]", [i + 1 for i, x in enumerate(v_types) i
 ok("view POST: attempt auto-created", TestAttempt.objects.filter(test_id=v_test_id).exists())
 
 # stale client field is ignored (cannot force mcq-only)
-r = vc.post("/mock-test/", data='{"num_questions": 10, "difficulty": "medium", "timer_minutes": 30, "doc_ids": [13], "question_type": "mcq"}', content_type="application/json")
+r = vc.post("/mock-test/", data=f'{{"num_questions": 10, "difficulty": "medium", "timer_minutes": 30, "doc_ids": [{DOC_ID}], "question_type": "mcq"}}', content_type="application/json")
 ok("view POST stale question_type ignored -> 200", r.status_code == 200, r.content[:200])
 v2_id = int(r.json()["redirect"].strip("/").split("/")[1])
 v2_types = list(TestQuestion.objects.filter(test_id=v2_id).order_by("id").values_list("question_type", flat=True))

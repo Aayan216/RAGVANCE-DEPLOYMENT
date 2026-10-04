@@ -110,3 +110,23 @@ PRACTICE_BATCH_SIZE = 3
 PRACTICE_QUESTIONS_PER_LLM_CALL = 5
 GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "2"))
 GEMINI_RETRY_BASE_DELAY = float(os.getenv("GEMINI_RETRY_BASE_DELAY", "1.0"))
+
+# Document ingestion safety limits (validated at upload / process time).
+# Overridable via environment variables; NOT user-editable settings.
+#
+# MAX_UPLOAD_FILE_SIZE_MB: bounds parse/clean/embed memory and wall time for a
+# single upload. 25 MB of extracted text is far above any legitimate study
+# document while keeping worst-case process RSS predictable on the 512MB
+# Render free instance.
+MAX_UPLOAD_FILE_SIZE_MB = int(os.getenv("MAX_UPLOAD_FILE_SIZE_MB", "25"))
+# MAX_DOCUMENTS: bounds total stored files + total FAISS vectors across the
+# instance. Counting is based on actual Document records only (failed uploads
+# never consume a slot; nothing is auto-deleted at the limit - new uploads are
+# simply rejected).
+MAX_DOCUMENTS = int(os.getenv("MAX_DOCUMENTS", "20"))
+# MAX_CHUNKS_PER_DOCUMENT: bounds the O(n^2) near-duplicate pass and the embed
+# step so one pathological document cannot blow the gunicorn request budget
+# (--timeout 180) or the vector store. 5000 confirmed by
+# tests/benchmark_ingest.py: dedup(n=5000)=33s, embed ~80 chunks/s -> ~63s,
+# chunker 0.2s, bulk insert 0.2s => est. 111s of the 180s budget.
+MAX_CHUNKS_PER_DOCUMENT = int(os.getenv("MAX_CHUNKS_PER_DOCUMENT", "5000"))

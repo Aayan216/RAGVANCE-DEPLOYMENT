@@ -152,35 +152,68 @@ function showToast(type, message) {
     new bootstrap.Toast(document.getElementById(toastId), { delay: 4000 }).show();
 }
 
-function processDocument(docId) {
+// Safe JSON parser for API responses.
+// Reads text first, detects empty/non-JSON bodies (e.g. proxy 502/504 pages
+// during long processing) and converts them into a clear, human-readable
+// Error carrying the HTTP status. The raw SyntaxError
+// "Unexpected end of JSON input" is never shown to the user.
+async function parseJsonResponse(response) {
+    let text;
+    try {
+        text = await response.text();
+    } catch (err) {
+        throw new Error(`Could not read the server response (HTTP ${response.status}).`);
+    }
+
+    if (!text || !text.trim()) {
+        throw new Error(`Server returned an empty response (HTTP ${response.status}).`);
+    }
+
+    let data;
+    try {
+        data = JSON.parse(text);
+    } catch (err) {
+        throw new Error(`Server returned an invalid response (HTTP ${response.status}).`);
+    }
+
+    if (!response.ok || data.success === false) {
+        const error = new Error(
+            data.error || data.message || `Request failed (HTTP ${response.status}).`
+        );
+        error.status = response.status;
+        error.data = data;
+        throw error;
+    }
+    return data;
+}
+
+async function processDocument(docId) {
     const btn = document.querySelector(`[data-doc-id="${docId}"]`);
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Processing...';
-    
-    fetch(`{% url 'process_document' 0 %}`.replace('0', docId), {
-        method: 'POST',
-        headers: {
-            'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
-            'Content-Type': 'application/json',
-        }
-    })
-    .then(res => res.json())
-    .then(data => {
-        if (data.status === 'success') {
+
+    try {
+        const response = await fetch(`{% url 'process_document' 0 %}`.replace('0', docId), {
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value,
+                'Content-Type': 'application/json',
+            }
+        });
+        const data = await parseJsonResponse(response);
+
+        if (data.status === 'success' || data.status === 'already_processed') {
             location.reload();
-        } else if (data.status === 'already_processed') {
-            location.reload();
-        } else {
-            showToast('error', data.message);
-            btn.disabled = false;
-            btn.innerHTML = '<i class="bi bi-gear"></i> Process';
+            return;
         }
-    })
-    .catch(err => {
-        showToast('error', err);
+        // Parsed JSON but not a success status: show the real backend message.
+        showToast('error', data.error || data.message || 'Document processing failed.');
+    } catch (err) {
+        showToast('error', err.message || 'Document processing failed.');
+    } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="bi bi-gear"></i> Process';
-    });
+    }
 }
 
 let deleteDocId = null;
@@ -205,7 +238,7 @@ document.getElementById('confirmDeleteBtn').addEventListener('click', async () =
             }
         });
 
-        const data = await response.json();
+        const data = await parseJsonResponse(response);
         bootstrap.Modal.getInstance(document.getElementById('deleteModal')).hide();
 
         if (data.status === 'success') {
@@ -213,10 +246,15 @@ document.getElementById('confirmDeleteBtn').addEventListener('click', async () =
             if (row) row.remove();
             showToast('success', data.message);
         } else {
-            showToast('error', data.message);
+            showToast('error', data.error || data.message || 'Delete failed.');
         }
     } catch (err) {
-        showToast('error', err.message);
+        // Close the modal whenever a JSON body was actually received
+        // (matches the previous behavior); keep it open on network failures.
+        if (err.data) {
+            bootstrap.Modal.getInstance(document.getElementById('deleteModal')).hide();
+        }
+        showToast('error', err.message || 'Delete failed.');
     } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="bi bi-trash"></i> Delete Permanently';

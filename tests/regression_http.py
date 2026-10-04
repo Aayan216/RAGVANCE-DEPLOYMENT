@@ -12,8 +12,14 @@ from django.test import Client
 from django.utils import timezone
 
 from backend import views
-from backend.models import MockTest, TestAttempt, TestQuestion, UserAnswer
+from backend.models import Document, MockTest, TestAttempt, TestQuestion, UserAnswer
 from mock_test import MockTestService
+
+# Fixture doc: resolve a live processed document instead of hardcoding an id
+# (the corpus is not guaranteed to contain any specific id).
+DOC_ID = Document.objects.filter(processed=True).values_list("id", flat=True).first()
+if DOC_ID is None:
+    raise SystemExit("requires >=1 processed document in corpus")
 
 PASSED = 0
 FAILED = 0
@@ -104,7 +110,7 @@ created = []
 try:
     # create test 1 (submit flow)
     r = c.post("/mock-test/", data=json.dumps({"num_questions": 10, "difficulty": "medium",
-                                               "timer_minutes": 30, "doc_ids": [13]}),
+                                               "timer_minutes": 30, "doc_ids": [DOC_ID]}),
                content_type="application/json")
     ok("create test -> 200 redirect", r.status_code == 200 and r.json().get("redirect", "").startswith("/mock-test/"), r.content[:150])
     tid1 = int(r.json()["redirect"].strip("/").split("/")[1])
@@ -134,7 +140,7 @@ try:
 
     # create test 2 (terminate flow)
     r = c.post("/mock-test/", data=json.dumps({"num_questions": 10, "difficulty": "easy",
-                                               "timer_minutes": 10, "doc_ids": [13]}),
+                                               "timer_minutes": 10, "doc_ids": [DOC_ID]}),
                content_type="application/json")
     tid2 = int(r.json()["redirect"].strip("/").split("/")[1])
     created.append(tid2)

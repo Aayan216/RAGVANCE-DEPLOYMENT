@@ -9,7 +9,13 @@ os.chdir(r"D:\v5\RAG-p2")
 import django
 django.setup()
 
+from backend.models import Document
 from backend.views import rag_chain
+
+# Fixture doc: resolve a live processed document instead of hardcoding an id.
+DOC_ID = Document.objects.filter(processed=True).values_list("id", flat=True).first()
+if DOC_ID is None:
+    raise SystemExit("requires >=1 processed document in corpus")
 
 RESULTS = []
 
@@ -47,7 +53,7 @@ class StubLLM:
         return StubResponse(json.dumps({"questions": self.questions}))
 
 
-results = rag_chain._retrieve_context("key concepts", doc_ids=[13])
+results = rag_chain._retrieve_context("key concepts", doc_ids=[DOC_ID])
 allowed = [r["faiss_id"] for r in results]
 ok("retrieval yields >=3 chunks", len(allowed) >= 3, str(allowed))
 a, b, cc = allowed[0], allowed[1], allowed[2]
@@ -58,7 +64,7 @@ orig_llm = rag_chain.llm
 stub = StubLLM([make_question(1, [a]), make_question(2, [b, cc])])
 rag_chain.llm = stub
 try:
-    out = rag_chain.generate_mcq_batch(topic="key concepts", doc_ids=[13], count=2)
+    out = rag_chain.generate_mcq_batch(topic="key concepts", doc_ids=[DOC_ID], count=2)
 finally:
     rag_chain.llm = orig_llm
 ok("batch returns 2 questions", len(out) == 2, str(len(out)))
@@ -72,7 +78,7 @@ ok("batch called the model once", stub.n == 1, f"n={stub.n}")
 stub2 = StubLLM([make_question(1, [cc, 999999, str(a), "abc", True])])
 rag_chain.llm = stub2
 try:
-    out2 = rag_chain.generate_mcq_batch(topic="key concepts", doc_ids=[13], count=1)
+    out2 = rag_chain.generate_mcq_batch(topic="key concepts", doc_ids=[DOC_ID], count=1)
 finally:
     rag_chain.llm = orig_llm
 ok("foreign/non-int ids dropped, strings coerced, order kept",
@@ -82,7 +88,7 @@ ok("foreign/non-int ids dropped, strings coerced, order kept",
 stub3 = StubLLM([make_question(1), make_question(2, ["abc"])])
 rag_chain.llm = stub3
 try:
-    out3 = rag_chain.generate_mcq_batch(topic="key concepts", doc_ids=[13], count=2)
+    out3 = rag_chain.generate_mcq_batch(topic="key concepts", doc_ids=[DOC_ID], count=2)
 finally:
     rag_chain.llm = orig_llm
 ok("missing source_chunks -> full retrieval fallback",
@@ -127,7 +133,7 @@ class PromptLabelStub:
 stub4 = PromptLabelStub()
 rag_chain.llm = stub4
 try:
-    out4 = rag_chain.generate_mock_questions_batch(doc_ids=[13], count=2)
+    out4 = rag_chain.generate_mock_questions_batch(doc_ids=[DOC_ID], count=2)
 finally:
     rag_chain.llm = orig_llm
 ok("mock: prompt carried context labels", len(stub4.seen_fids) >= 2, str(stub4.seen_fids))
@@ -140,7 +146,7 @@ ok("mock: question_type stamped", all(q.get("question_type") == "mcq" for q in o
 stub5 = PromptLabelStub(question_type="true_false")
 rag_chain.llm = stub5
 try:
-    out5 = rag_chain.generate_mock_questions_batch(doc_ids=[13], count=1, question_type="true_false")
+    out5 = rag_chain.generate_mock_questions_batch(doc_ids=[DOC_ID], count=1, question_type="true_false")
 finally:
     rag_chain.llm = orig_llm
 ok("T/F: per-question set preserved from prompt labels",

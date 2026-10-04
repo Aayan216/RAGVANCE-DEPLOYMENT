@@ -1,10 +1,13 @@
 import json
+import logging
 import os
+import re
 import sys
 import threading
 import time
 from django.shortcuts import render, redirect, get_object_or_404
 from django.http import JsonResponse, HttpResponseBadRequest
+from django.db import transaction
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.contrib import messages
@@ -25,6 +28,38 @@ from rag import (
 from rag.cleaning import clean_pages, near_duplicate_mask
 from rag.llm_resilience import is_transient_llm_error
 # mock_test (pulls pandas + sklearn) is imported lazily by the proxies below.
+
+logger = logging.getLogger(__name__)
+
+_ALLOWED_FILE_TYPES = ("pdf", "docx", "pptx", "txt")
+
+# Patterns for keeping API error messages free of internal details.
+_WIN_PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s'\"]*")
+_UNIX_PATH_RE = re.compile(
+    r"/(?:home|opt|usr|var|tmp|etc|srv|workspace|Users|app)(?:/[^\s'\"]*)*"
+)
+_URL_CRED_RE = re.compile(r"\b(?:postgres(?:ql)?|https?)://[^\s'\"]+")
+_SECRET_RE = re.compile(
+    r"\b(?:AIza[0-9A-Za-z_\-]{10,}|sb_secret_[0-9A-Za-z\-_]{10,}|"
+    r"sk-[0-9A-Za-z\-_]{10,}|eyJ[0-9A-Za-z_\-]{10,}\.[0-9A-Za-z_\-]{10,})"
+)
+
+
+def _safe_error_message(exc: BaseException) -> str:
+    """Human-readable error detail with paths/credentials stripped.
+
+    Full traceback + exception details are logged server-side via
+    logger.exception(); this is only what crosses the wire to the browser.
+    """
+    raw = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    raw = _URL_CRED_RE.sub("<redacted>", raw)
+    raw = _SECRET_RE.sub("<redacted>", raw)
+    raw = _WIN_PATH_RE.sub("<path>", raw)
+    raw = _UNIX_PATH_RE.sub("<path>", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    if len(raw) > 300:
+        raw = raw[:300] + "..."
+    return raw or type(exc).__name__
 
 
 def _rss_mb():
@@ -150,7 +185,11 @@ _log_rss("imported backend.views")
 def upload_view(request):
     """File upload page with document list."""
     if request.method == "POST":
-        form = DocumentUploadForm(request.POST, request.FILES)
+        form = DocumentUploadForm(
+            request.POST,
+            request.FILES,
+            document_count=Document.objects.count(),
+        )
         if form.is_valid():
             doc = form.save(commit=False)
             if not doc.title:
@@ -175,14 +214,53 @@ def upload_view(request):
     return render(request, "upload.html", {"form": form, "documents": documents})
 
 
-@require_http_methods(["POST"])
 def process_document_view(request, doc_id):
-    """Process uploaded document: parse, chunk, embed, store."""
-    doc = get_object_or_404(Document, id=doc_id)
-    
+    """Process uploaded document: parse, chunk, embed, store.
+
+    API-style endpoint: EVERY execution path returns JSON with a proper
+    HTTP status. Full tracebacks are logged server-side only.
+    """
+    if request.method != "POST":
+        return JsonResponse(
+            {"success": False, "status": "error", "error": "Method not allowed."},
+            status=405,
+        )
+
+    doc = Document.objects.filter(id=doc_id).first()
+    if doc is None:
+        return JsonResponse(
+            {"success": False, "status": "error", "error": "Document not found."},
+            status=404,
+        )
+
     if doc.processed:
-        return JsonResponse({"status": "already_processed", "chunks": doc.chunk_count})
-    
+        return JsonResponse({
+            "success": True,
+            "status": "already_processed",
+            "document_id": doc.id,
+            "processed": True,
+            "chunks": doc.chunk_count,
+            "message": "Document already processed.",
+        })
+
+    if doc.file_type not in _ALLOWED_FILE_TYPES:
+        msg = "Unsupported file type. Allowed: PDF, DOCX, PPTX, TXT"
+        return JsonResponse(
+            {"success": False, "status": "error", "error": msg, "message": msg},
+            status=400,
+        )
+
+    started = time.time()
+    faiss_added = False
+
+    def _discard_unsaved_add():
+        # save() has not succeeded, so disk still holds the pre-add state;
+        # reloading the index discards the in-memory vectors cleanly.
+        try:
+            vector_store.load()
+        except Exception:
+            logger.exception("FAISS in-memory rollback failed for doc=%s", doc.id)
+
     try:
         # Parse (local file if present; otherwise pull a temp copy from Storage)
         file_path, temp_path = supabase_storage.materialize_file(
@@ -208,7 +286,11 @@ def process_document_view(request, doc_id):
         chunks = chunker.chunk_pages(pages)
 
         if not chunks:
-            return JsonResponse({"status": "error", "message": "No text extracted from document"})
+            msg = "No text could be extracted from the document."
+            return JsonResponse(
+                {"success": False, "status": "error", "error": msg, "message": msg},
+                status=400,
+            )
 
         # Embed
         texts = [c["content"] for c in chunks]
@@ -220,8 +302,25 @@ def process_document_view(request, doc_id):
             chunks = [c for c, k in zip(chunks, keep) if k]
             embeddings = embeddings[[i for i, k in enumerate(keep) if k]]
         if not chunks:
-            return JsonResponse({"status": "error", "message": "No text extracted from document"})
-        
+            msg = "No text could be extracted from the document."
+            return JsonResponse(
+                {"success": False, "status": "error", "error": msg, "message": msg},
+                status=400,
+            )
+
+        # Chunk ceiling - enforced BEFORE any FAISS/DB persistence so an
+        # over-limit document is never partially indexed or marked processed.
+        max_chunks = int(getattr(settings, "MAX_CHUNKS_PER_DOCUMENT", 5000))
+        if len(chunks) > max_chunks:
+            msg = (
+                "Document contains too much content to process safely. "
+                "Please split the document into smaller files."
+            )
+            return JsonResponse(
+                {"success": False, "status": "error", "error": msg, "message": msg},
+                status=400,
+            )
+
         # Prepare metadata
         metadata = []
         for i, chunk in enumerate(chunks):
@@ -232,39 +331,96 @@ def process_document_view(request, doc_id):
                 "page_number": chunk["page_number"],
                 "file_name": chunk["file_name"],
             })
-        
-        # Store in FAISS
+
+        # Stage 1: in-memory FAISS add (nothing durable yet)
+        faiss_added = True
         faiss_ids = vector_store.add(embeddings, metadata)
-        vector_store.save()
-        
-        # Save to Django models
-        chunk_objects = [
-            Chunk(
-                document=doc,
-                content=chunk["content"],
-                embedding_id=faiss_ids[i],
-                page_number=chunk["page_number"],
-                chunk_index=chunk["chunk_index"],
-            )
-            for i, chunk in enumerate(chunks)
-        ]
-        Chunk.objects.bulk_create(chunk_objects)
-        
-        # Update document
-        doc.processed = True
-        doc.chunk_count = len(chunks)
-        doc.save()
-        
-        return JsonResponse({"status": "success", "chunks": len(chunks)})
-    
-    except Exception as e:
-        return JsonResponse({"status": "error", "message": str(e)})
+
+        # Stage 2: database writes atomically (chunk rows + processed flag)
+        try:
+            with transaction.atomic():
+                chunk_objects = [
+                    Chunk(
+                        document=doc,
+                        content=chunk["content"],
+                        embedding_id=faiss_ids[i],
+                        page_number=chunk["page_number"],
+                        chunk_index=chunk["chunk_index"],
+                    )
+                    for i, chunk in enumerate(chunks)
+                ]
+                Chunk.objects.bulk_create(chunk_objects)
+                doc.processed = True
+                doc.chunk_count = len(chunks)
+                doc.save()
+        except Exception:
+            # DB failed -> discard the unsaved in-memory vectors (no orphans).
+            if faiss_added:
+                _discard_unsaved_add()
+                faiss_added = False
+            raise
+
+        # Stage 3: persist index (disk + best-effort cloud mirror)
+        try:
+            vector_store.save()
+        except Exception:
+            # Persist failed -> compensate DB so no partial document remains.
+            try:
+                with transaction.atomic():
+                    Chunk.objects.filter(document=doc).delete()
+                    doc.processed = False
+                    doc.chunk_count = 0
+                    doc.save()
+            except Exception:
+                logger.exception(
+                    "DB rollback after failed FAISS save incomplete for doc=%s",
+                    doc.id,
+                )
+            if faiss_added:
+                _discard_unsaved_add()
+                faiss_added = False
+            raise
+
+        print(
+            f"[INFO] processed doc={doc.id} pages={len(pages)} "
+            f"chunks={len(chunks)} sec={time.time() - started:.1f}",
+            flush=True,
+        )
+        return JsonResponse({
+            "success": True,
+            "status": "success",
+            "document_id": doc.id,
+            "processed": True,
+            "chunks": len(chunks),
+            "message": "Document processed successfully.",
+        })
+
+    except Exception as exc:
+        logger.exception("Document processing failed for doc=%s", doc_id)
+        detail = f"Document processing failed: {_safe_error_message(exc)}"
+        return JsonResponse(
+            {"success": False, "status": "error", "error": detail, "message": detail},
+            status=500,
+        )
 
 
-@require_http_methods(["POST"])
 def delete_document_view(request, doc_id):
-    """Permanently delete a document: DB record, chunks, vector embeddings, and file."""
-    doc = get_object_or_404(Document, id=doc_id)
+    """Permanently delete a document: DB record, chunks, vector embeddings, and file.
+
+    API-style endpoint: always returns JSON.
+    """
+    if request.method != "POST":
+        return JsonResponse(
+            {"success": False, "status": "error", "error": "Method not allowed."},
+            status=405,
+        )
+
+    doc = Document.objects.filter(id=doc_id).first()
+    if doc is None:
+        return JsonResponse(
+            {"success": False, "status": "error", "error": "Document not found."},
+            status=404,
+        )
 
     try:
         doc_title = doc.title
@@ -286,11 +442,17 @@ def delete_document_view(request, doc_id):
         doc.delete()
 
         return JsonResponse({
+            "success": True,
             "status": "success",
             "message": f'"{doc_title}" was permanently deleted.',
         })
-    except Exception as e:
-        return JsonResponse({"status": "error", "message": str(e)}, status=500)
+    except Exception as exc:
+        logger.exception("Document deletion failed for doc=%s", doc_id)
+        detail = f"Failed to delete document: {_safe_error_message(exc)}"
+        return JsonResponse(
+            {"success": False, "status": "error", "error": detail, "message": detail},
+            status=500,
+        )
 
 
 def tutor_view(request):

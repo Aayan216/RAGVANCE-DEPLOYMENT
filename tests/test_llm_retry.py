@@ -15,7 +15,13 @@ import httpx
 from django.conf import settings
 from django.test import RequestFactory, override_settings
 
+from backend.models import Document
 from backend.views import practice_generate_view, tutor_ask_view, rag_chain
+
+# Fixture doc: resolve a live processed document instead of hardcoding an id.
+DOC_ID = Document.objects.filter(processed=True).values_list("id", flat=True).first()
+if DOC_ID is None:
+    raise SystemExit("requires >=1 processed document in corpus")
 from google.genai.errors import APIError, ServerError
 from langchain_google_genai.chat_models import (
     GoogleAPIError,
@@ -171,7 +177,7 @@ rag_chain.llm = typed
 
 req = rf.post(
     "/practice/generate/",
-    data=json.dumps({"num_questions": 5, "difficulty": "medium", "topic": None, "doc_ids": [13]}),
+    data=json.dumps({"num_questions": 5, "difficulty": "medium", "topic": None, "doc_ids": [DOC_ID]}),
     content_type="application/json",
 )
 buf = io.StringIO()
